@@ -1,2 +1,2 @@
-#RAG Pipeline
+# RAG Pipeline
 Initial README

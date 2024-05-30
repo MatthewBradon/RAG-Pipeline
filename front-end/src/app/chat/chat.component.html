@@ -1,0 +1,11 @@
+<div id="chatBox">
+    <div id="chatOutput">
+        @for(message of chatMessages; track message){
+            <p [ngClass]="message.isUser ? 'userMessage' : 'botMessage'" class = "message" markdown="1">{{message.message}}</p>
+        }
+    </div>
+    <div id="chatInput">
+        <textarea id="messageInput"[(ngModel)]="message" (keyup.enter)="sendMessage()" [disabled]="isLoading" placeholder="Type your message here..."></textarea>
+        <button id="sendButton" (click)="sendMessage()" [disabled]="isLoading">Send</button>
+    </div>
+</div>

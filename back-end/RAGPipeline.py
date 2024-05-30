@@ -47,7 +47,7 @@ class RAGPipeline():
 
         #Use RecursiveCharacterTextSplitter to split the text into chunks using the TikToken encoder
         text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-            chunk_size=250,
+            chunk_size=128,
             chunk_overlap=0,
         )
 
@@ -69,7 +69,7 @@ class RAGPipeline():
         self.retrieval_llm = ChatOllama(model=self.LLM_name, format="json", temperature=0)
 
         #Promt to ask the user to grade the relevance of a document to a question
-        self.prompt = PromptTemplate(
+        self.relevance_prompt = PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|> You are a grader assessing relevance 
             of a retrieved document to a user question. If the document contains keywords related to the user question, 
             grade it as relevant. It does not need to be a stringent test. The goal is to filter out erroneous retrievals. \n
@@ -83,22 +83,22 @@ class RAGPipeline():
         )
 
         # Pipe | instantiates promt outputs it to the LLM model and then parses the output
-        self.retrieval_grader = self.prompt | self.retrieval_llm | JsonOutputParser()
+        self.retrieval_grader = self.relevance_prompt | self.retrieval_llm | JsonOutputParser()
 
 
         #Normal generic prompt for llama3
         self.normal_llm = ChatOllama(model=self.LLM_name, temperature=0)
 
-        self.prompt = PromptTemplate(
+        self.normal_prompt = PromptTemplate(
             template="""<|eof_id|><|start_header_id|>user<|end_header_id|> {question} <|eof_id|><|start_header_id|>assistant<|end_header_id>""",
             input_variables=["question"],
         )
 
-        self.normalLLm = self.prompt | self.normal_llm | StrOutputParser()
+        self.normalLLm = self.normal_prompt | self.normal_llm | StrOutputParser()
 
 
         #Generation using the RAG pipeline
-        self.prompt = PromptTemplate(
+        self.rag_prompt = PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|> You are an assistant for question-answering tasks. 
             Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. 
             Use three sentences maximum and keep the answer concise <|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -109,7 +109,7 @@ class RAGPipeline():
         )
 
         self.rag_llm = ChatOllama(model=self.LLM_name, temperature=0)
-        self.rag_chain = self.prompt | self.rag_llm | StrOutputParser()
+        self.rag_chain = self.rag_prompt | self.rag_llm | StrOutputParser()
 
 
 
@@ -117,7 +117,7 @@ class RAGPipeline():
 
         self.hallucination_llm = ChatOllama(model=self.LLM_name, format="json",temperature=0)
 
-        self.prompt = PromptTemplate(
+        self.hallucination_prompt = PromptTemplate(
             template=""" <|begin_of_text|><|start_header_id|>system<|end_header_id|> You are a grader assessing whether 
             an answer is grounded in / supported by a set of facts. Give a binary 'yes' or 'no' score to indicate 
             whether the answer is grounded in / supported by a set of facts. Provide the binary score as a JSON with a 
@@ -130,7 +130,7 @@ class RAGPipeline():
             input_variables=["generation", "documents"],
         )
 
-        self.hallucination_grader = self.prompt | self.hallucination_llm | JsonOutputParser()
+        self.hallucination_grader = self.hallucination_prompt | self.hallucination_llm | JsonOutputParser()
 
 
 
@@ -138,7 +138,7 @@ class RAGPipeline():
 
         self.grader_llm = ChatOllama(model=self.LLM_name, format="json",temperature=0)
 
-        self.prompt = PromptTemplate(
+        self.grader_prompt = PromptTemplate(
             template="""<|begin_of_text|><|start_header_id|>system<|end_header_id|> You are a grader assessing whether an 
             answer is useful to resolve a question. Give a binary score 'yes' or 'no' to indicate whether the answer is 
             useful to resolve a question. Provide the binary score as a JSON with a single key 'score' and no preamble or explanation.
@@ -150,7 +150,7 @@ class RAGPipeline():
             input_variables=["generation", "question"],
         )
 
-        self.answer_grader = self.prompt | self.grader_llm | JsonOutputParser()
+        self.answer_grader = self.grader_prompt | self.grader_llm | JsonOutputParser()
 
         self.createWorkflow()
 
@@ -175,6 +175,8 @@ class RAGPipeline():
 
         # Retrieval
         documents = self.retriever.invoke(question)
+        pprint(documents)
+        # print(documents)
         return {"documents": documents, "question": question}
 
     def generate(self, state):
@@ -193,6 +195,7 @@ class RAGPipeline():
             
         # RAG generation
         generation = self.rag_chain.invoke({"context": documents, "question": question})
+        print(generation)
         return {"documents": documents, "question": question, "generation": generation}
 
     def generate_normal(self, state):
@@ -205,12 +208,13 @@ class RAGPipeline():
         Returns:
             state (dict): New key added to state, generation, that contains LLM generation
         """
-        print("---GENERATE---")
+        print("---GENERATE NORMAL---")
         question = state["question"]
         documents = state["documents"]
         
         # Normal generation
         generation = self.normalLLm.invoke({"question": question})
+        print(generation)
         return {"documents": documents, "question": question, "generation": generation}
 
     def grade_documents(self, state):
@@ -232,6 +236,7 @@ class RAGPipeline():
         # Score each doc
         filtered_docs = []
         for d in documents:
+            # print(d.page_content)
             score = self.retrieval_grader.invoke(
                 {"question": question, "document": d.page_content}
             )
@@ -257,12 +262,15 @@ class RAGPipeline():
             str: Binary decision for next node to call
         """
 
-        print("---ASSESS GRADED DOCUMENTS---")
-        question = state["question"]
-        filtered_documents = state["documents"]
+        document = state["documents"]
 
-        # We have relevant documents, so generate answer
-        print("---DECISION: GENERATE---")
+        # If no documents are relevant, run web search
+        if len(document) == 0:
+            print("---DECISION: NO RELEVANT DOCUMENTS ---")
+            return "generate_normal"
+        else:
+            print("---DECISION: RELEVANT DOCUMENTS FOUND ---")
+
         return "generate"
 
     def grade_generation_v_documents_and_question(self, state):
@@ -280,10 +288,12 @@ class RAGPipeline():
         question = state["question"]
         documents = state["documents"]
         generation = state["generation"]
-
+        print(generation)
         score = self.hallucination_grader.invoke(
             {"documents": documents, "generation": generation}
         )
+        print(score)
+        print(score["score"])
         grade = score["score"]
 
         # Check hallucination
@@ -325,6 +335,7 @@ class RAGPipeline():
             self.decide_to_generate,
             {
                 "generate": "generate",
+                "generate_normal": "generate_normal",
             },
         )
         # Checks if the RAG pipeline LLM generation is grounded in the documents and answers the question
@@ -337,15 +348,8 @@ class RAGPipeline():
                 "not useful": "generate_normal",
             },
         )
-        # Check if the generation is grounded in the documents and answers the question
-        self.workflow.add_conditional_edges(
-            "generate_normal",
-            self.grade_generation_v_documents_and_question,
-            {
-                "useful": END,
-                "not useful": "generate_normal",
-            },
-        )
+        # If doing generate normal end the workflow
+        self.workflow.add_edge("generate_normal", END)
 
         # Compile
         self.app = self.workflow.compile()
